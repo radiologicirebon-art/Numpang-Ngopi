@@ -1,0 +1,253 @@
+import React, { useState } from "react";
+
+// Numpang Ngopi - Single-file React component
+// Tailwind CSS utility classes are used for styling (assumes Tailwind is set up in the project)
+// How it works:
+// - Menu + add-ons are defined in arrays
+// - User chooses quantities, add-ons per item
+// - "Send to WhatsApp" composes a message, opens wa.me link, and also saves order to Firebase Realtime Database
+// - Replace `FIREBASE_DB_URL` with your Realtime DB base URL if different
+
+const FIREBASE_DB_URL = "https://numpang-ngopi-crb-2c1b7-default-rtdb.firebaseio.com"; // provided by user
+const WHATSAPP_PHONE = "628984290300"; // convert 0-prefixed Indonesian number to international format
+
+const MENU = [
+  { id: "kopi_susu_gula_aren", name: "kopi susu gula aren", price: 8000 },
+  { id: "kopi_susu_latte", name: "kopi susu latte", price: 8000 },
+  { id: "americano", name: "Americano", price: 6000 },
+  { id: "capuchino", name: "capuchino", price: 10000 },
+  { id: "taro_coffe", name: "taro coffe", price: 10000 },
+  { id: "taro_latte", name: "taro latte", price: 8000 },
+  { id: "coklat_latte", name: "coklat latte", price: 8000 },
+  { id: "redvelvet_latte", name: "redvelvet latte", price: 8000 },
+];
+
+const ADDONS = [
+  { id: "creamy", name: "Creamy", price: 1000 },
+  { id: "aren", name: "Aren", price: 1000 },
+  { id: "es_batu", name: "Es Batu", price: 0 },
+];
+
+export default function NumpangNgopiOrderApp() {
+  const [cart, setCart] = useState({});
+  const [customerName, setCustomerName] = useState("");
+  const [note, setNote] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [savedMessage, setSavedMessage] = useState(null);
+
+  function addToCart(itemId) {
+    setCart((c) => {
+      const prev = c[itemId] || { qty: 0, addons: {} };
+      return { ...c, [itemId]: { ...prev, qty: prev.qty + 1 } };
+    });
+  }
+
+  function removeFromCart(itemId) {
+    setCart((c) => {
+      const prev = c[itemId];
+      if (!prev) return c;
+      const newQty = prev.qty - 1;
+      if (newQty <= 0) {
+        const copy = { ...c };
+        delete copy[itemId];
+        return copy;
+      }
+      return { ...c, [itemId]: { ...prev, qty: newQty } };
+    });
+  }
+
+  function setQty(itemId, qty) {
+    if (qty <= 0) {
+      setCart((c) => {
+        const copy = { ...c };
+        delete copy[itemId];
+        return copy;
+      });
+      return;
+    }
+    setCart((c) => ({ ...c, [itemId]: { ...(c[itemId] || { addons: {} }), qty } }));
+  }
+
+  function toggleAddon(itemId, addonId) {
+    setCart((c) => {
+      const prev = c[itemId] || { qty: 1, addons: {} };
+      const exists = !!prev.addons[addonId];
+      const addons = { ...prev.addons };
+      if (exists) delete addons[addonId];
+      else addons[addonId] = true;
+      return { ...c, [itemId]: { ...prev, addons } };
+    });
+  }
+
+  function getItemPrice(itemId) {
+    const menuItem = MENU.find((m) => m.id === itemId);
+    return menuItem ? menuItem.price : 0;
+  }
+
+  function getAddonsPrice(itemId) {
+    const entry = cart[itemId];
+    if (!entry || !entry.addons) return 0;
+    return Object.keys(entry.addons).reduce((sum, aid) => {
+      const addon = ADDONS.find((a) => a.id === aid);
+      return sum + (addon ? addon.price : 0);
+    }, 0);
+  }
+
+  function calculateTotal() {
+    return Object.entries(cart).reduce((sum, [itemId, entry]) => {
+      const itemBase = getItemPrice(itemId);
+      const addons = getAddonsPrice(itemId);
+      return sum + (itemBase + addons) * entry.qty;
+    }, 0);
+  }
+
+  function cartToText() {
+    if (Object.keys(cart).length === 0) return "(kosong)";
+    let lines = [];
+    MENU.forEach((m) => {
+      if (cart[m.id]) {
+        const e = cart[m.id];
+        const addons = e.addons ? Object.keys(e.addons).map((a) => ADDONS.find(x => x.id===a)?.name).filter(Boolean) : [];
+        const itemTotal = (m.price + (addons.reduce((s, an) => s + (ADDONS.find(x => x.name===an)?.price||0), 0))) * e.qty;
+        lines.push(`${m.name} x${e.qty} - Rp${(m.price + (addons.reduce((s, an) => s + (ADDONS.find(x => x.name===an)?.price||0), 0))).toLocaleString()} each${addons.length? ' (+'+addons.join(', ')+')':''} => Rp${itemTotal.toLocaleString()}`);
+      }
+    });
+    lines.push(`Total: Rp${calculateTotal().toLocaleString()}`);
+    return lines.join("\n");
+  }
+
+  async function sendOrder() {
+    if (Object.keys(cart).length === 0) {
+      alert("Keranjang kosong. Silakan tambahkan pesanan.");
+      return;
+    }
+    setLoading(true);
+    const order = {
+      customerName: customerName || "-",
+      note,
+      cart,
+      total: calculateTotal(),
+      createdAt: new Date().toISOString(),
+    };
+
+    // 1) Save to Firebase Realtime Database (simple POST)
+    try {
+      const res = await fetch(`${FIREBASE_DB_URL}/orders.json`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(order),
+      });
+      const data = await res.json();
+      setSavedMessage(data.name ? `Tersimpan (id: ${data.name})` : "Tersimpan");
+    } catch (err) {
+      console.error("Firebase save error:", err);
+      setSavedMessage("Gagal simpan ke Firebase");
+    }
+
+    // 2) Compose WhatsApp message and open
+    const messageLines = [
+      `Halo saya ingin pesan,`,
+      `Nama: ${customerName || '-'}`,
+      `Pesanan:\n${cartToText()}`,
+      `Catatan: ${note || '-'}",
+    ];
+    const message = encodeURIComponent(messageLines.join("\n"));
+    const waUrl = `https://wa.me/${WHATSAPP_PHONE}?text=${message}`;
+
+    // open WA in new tab (user will send manually)
+    window.open(waUrl, "_blank");
+    setLoading(false);
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-6">
+      <div className="max-w-4xl mx-auto bg-white shadow-lg rounded-2xl p-6">
+        <h1 className="text-2xl font-bold mb-2">Numpang Ngopi - Pemesanan Online</h1>
+        <p className="text-sm text-gray-600 mb-6">Pilih menu, jumlah, dan add-ons. Klik "Kirim ke WhatsApp" untuk mengirim pesan ke admin.</p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <h2 className="text-lg font-semibold mb-2">Menu</h2>
+            <div className="space-y-3">
+              {MENU.map((m) => (
+                <div key={m.id} className="p-3 border rounded-lg flex justify-between items-center">
+                  <div>
+                    <div className="font-medium">{m.name}</div>
+                    <div className="text-sm text-gray-500">Rp{m.price.toLocaleString()}</div>
+                    <div className="mt-2 text-sm">Add-ons:</div>
+                    <div className="flex gap-2 mt-1">
+                      {ADDONS.map((a) => (
+                        <label key={a.id} className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={!!(cart[m.id] && cart[m.id].addons && cart[m.id].addons[a.id])}
+                            onChange={() => toggleAddon(m.id, a.id)}
+                          />
+                          <span>{a.name}{a.price? ` (+Rp${a.price.toLocaleString()})`: ''}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col items-end gap-2">
+                    <div className="text-sm">Rp{m.price.toLocaleString()}</div>
+                    <div className="flex items-center gap-2">
+                      <button className="px-2 py-1 rounded bg-gray-200" onClick={() => removeFromCart(m.id)}>-</button>
+                      <input
+                        type="number"
+                        min="0"
+                        value={(cart[m.id] && cart[m.id].qty) || 0}
+                        onChange={(e) => setQty(m.id, Number(e.target.value) || 0)}
+                        className="w-16 text-center border rounded"
+                      />
+                      <button className="px-2 py-1 rounded bg-green-200" onClick={() => addToCart(m.id)}>+</button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <h2 className="text-lg font-semibold mb-2">Ringkasan Pesanan</h2>
+            <div className="p-4 border rounded-lg bg-gray-50">
+              <div className="mb-2">
+                <label className="block text-sm">Nama (opsional)</label>
+                <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} className="w-full border rounded p-2 mt-1" placeholder="Nama pembeli" />
+              </div>
+
+              <div className="mb-2">
+                <label className="block text-sm">Catatan (misal: untuk dibungkus / tidak pemanis)</label>
+                <input value={note} onChange={(e) => setNote(e.target.value)} className="w-full border rounded p-2 mt-1" placeholder="Catatan" />
+              </div>
+
+              <div className="text-sm text-gray-700 mb-3 whitespace-pre-line">{cartToText()}</div>
+
+              <div className="text-lg font-semibold mb-4">Total: Rp{calculateTotal().toLocaleString()}</div>
+
+              <div className="flex gap-3">
+                <button disabled={loading} onClick={sendOrder} className="px-4 py-2 bg-green-600 text-white rounded">Kirim ke WhatsApp</button>
+                <button disabled={loading} onClick={() => { setCart({}); setSavedMessage(null); }} className="px-4 py-2 border rounded">Kosongkan</button>
+              </div>
+
+              {loading && <div className="mt-3 text-sm">Mengirim...</div>}
+              {savedMessage && <div className="mt-3 text-sm text-green-700">{savedMessage}</div>}
+            </div>
+
+            <div className="mt-4 text-xs text-gray-500">
+              Catatan teknis: aplikasi ini membuka WhatsApp Web / aplikasi dengan pesan yang sudah terisi. Pesan harus dikirim manual oleh pengguna di WhatsApp. Pesanan juga otomatis disimpan ke Firebase Realtime Database pada path /orders.
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 text-sm text-gray-600">
+          <strong>Pengaturan:</strong>
+          <ul className="list-disc ml-5">
+            <li>Jika Anda ingin mengubah nomor WA, ubah konstanta <code>WHATSAPP_PHONE</code> dalam berkas ini.</li>
+            <li>Jika Anda ingin menggunakan Firebase dengan aturan keamanan, atur rules di console Firebase. Contoh rules untuk development: <code>{`{\n  "rules": {\n    "/orders": {\n      ".read": true,\n      ".write": true\n    }\n  }\n}`}</code></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
