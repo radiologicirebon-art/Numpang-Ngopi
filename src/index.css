@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* custom util */
+.screen-card {
+  min-width: 320px;
+  max-width: 720px;
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.menu-img {
+  height: 144px;
+  width: 100%;
+  object-fit: cover;
+}
