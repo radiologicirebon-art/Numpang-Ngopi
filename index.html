@@ -8,12 +8,32 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .screen-card{min-width:320px;max-width:720px;border-radius:12px;padding:12px}
+    /* small card image styling */
+    .menu-img{height:144px;width:100%;object-fit:cover}
+  </style>
 </head>
 <body class="bg-gray-50">
   <div id="root"></div>
 
+  <!-- README (quick deploy + notes)
+  1) Save this file as index.html in a repo.
+  2) To publish on GitHub Pages: create repository, push this file as the root (index.html).
+     - git init
+     - git add index.html
+     - git commit -m "Initial"
+     - create repo on GitHub and push
+     - enable GitHub Pages in repo settings (branch: main, folder: /)
+  3) Realtime DB: make sure rules allow read/write for testing or configure auth.
+  4) Files include inline SVG generator for consistent AI-style illustrations.
+  5) This file supports: POS, Display Barista, Display Cooking (auto-refresh), Owner report.
+  6) Barista/Cooking screens have buttons to set order status: in-progress / done.
+  -->
+
   <script type="text/babel">
-    const DB_URL = 'https://numpang-ngopi-crb-2c1b7-default-rtdb.firebaseio.com';
+    // --- CONFIG ---
+    const DB_URL = 'https://depelop-nnc-default-rtdb.firebaseio.com';
     const WA_PHONE = '628984290300';
 
     const MENU = {
@@ -36,175 +56,219 @@
       ]
     };
 
-    function currency(n){
-      return 'Rp' + n.toLocaleString('id-ID');
+    function currency(n){ return 'Rp' + n.toLocaleString('id-ID'); }
+
+    // --- generate simple illustrative SVG (AI-like style) ---
+    function makeIllustration(text, seed=0){
+      // choose palette by seed
+      const palettes = [
+        ['#E6A9A9','#F6D6AD','#F9F3BD'],
+        ['#C8E6C9','#A5D6A7','#81C784'],
+        ['#D1C4E9','#B39DDB','#9575CD'],
+        ['#FFCDD2','#F8BBD0','#F48FB1'],
+        ['#B3E5FC','#81D4FA','#4FC3F7'],
+        ['#FFF9C4','#FFF59D','#FFE082']
+      ];
+      const p = palettes[Math.abs(seed) % palettes.length];
+      const svg = `
+        <svg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600'>
+          <rect width='100%' height='100%' fill='${p[0]}' rx='20' />
+          <circle cx='120' cy='140' r='90' fill='${p[1]}' />
+          <rect x='220' y='60' width='420' height='300' rx='24' fill='${p[2]}' opacity='0.95' />
+          <g transform='translate(260,100)'>
+            <text x='0' y='40' font-size='38' font-family='Segoe UI, Roboto, Arial' fill='#3b3b3b'>${escapeXml(text.split(' ')[0]||text)}</text>
+            <text x='0' y='80' font-size='20' font-family='Segoe UI, Roboto, Arial' fill='#555'>${escapeXml(text)}</text>
+          </g>
+        </svg>`;
+      return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
     }
 
+    function escapeXml(unsafe){ return unsafe.replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&apos;"}[c]; }); }
+
+    // --- Realtime DB helpers ---
+    async function postOrder(payload){
+      const res = await fetch(`${DB_URL}/orders.json`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      return res.json();
+    }
+    async function fetchOrders(){
+      try{
+        const res = await fetch(`${DB_URL}/orders.json`);
+        if(!res.ok) return [];
+        const json = await res.json(); if(!json) return [];
+        return Object.entries(json).map(([k,v])=>({ key:k, ...v }));
+      }catch(e){ return []; }
+    }
+    async function patchOrder(key, data){
+      const res = await fetch(`${DB_URL}/orders/${key}.json`, { method: 'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+      return res.json();
+    }
+
+    // --- App ---
     function App(){
-      const [cart, setCart] = React.useState(()=>{
-        try{
-          const raw = localStorage.getItem('numpang_cart');
-          return raw ? JSON.parse(raw) : [];
-        }catch{ return []; }
-      });
+      const [cart, setCart] = React.useState(()=>{ try{ return JSON.parse(localStorage.getItem('numpang_cart'))||[] }catch{return []} });
       const [sending, setSending] = React.useState(false);
       const [lastResult, setLastResult] = React.useState(null);
+      const [screen, setScreen] = React.useState('pos'); // pos | barista | cooking | owner
 
-      React.useEffect(()=>{
-        localStorage.setItem('numpang_cart', JSON.stringify(cart));
-      },[cart]);
+      React.useEffect(()=>{ localStorage.setItem('numpang_cart', JSON.stringify(cart)); },[cart]);
 
-      function addToCart(item){
-        setCart(prev => [...prev, { ...item, qty: 1, addons: [] }]);
-      }
+      function addToCart(item){ setCart(prev=>[...prev, {...item, qty:1, addons:[]}]); }
+      function changeQty(i,d){ setCart(p=>{const c=[...p]; c[i].qty=Math.max(1,c[i].qty+d); return c;}); }
+      function toggleAddon(i,a){ setCart(p=>{const c=[...p]; const f=c[i].addons||[]; const pos=f.indexOf(a.id); if(pos===-1) f.push(a.id); else f.splice(pos,1); c[i].addons=f; return c; }); }
+      function removeItem(i){ setCart(p=>p.filter((_,x)=>x!==i)); }
+      function itemSubtotal(ci){ const addonSum=(ci.addons||[]).reduce((s,aId)=>s+(MENU.Addons.find(x=>x.id===aId)?.price||0),0); return (ci.price+addonSum)*ci.qty; }
+      function total(){ return cart.reduce((s,ci)=>s+itemSubtotal(ci),0); }
 
-      function changeQty(index, delta){
-        setCart(prev => {
-          const copy = [...prev];
-          copy[index].qty = Math.max(1, copy[index].qty + delta);
-          return copy;
-        });
-      }
+      function buildMessage(){ if(!cart.length) return 'Halo saya ingin pesan, (belum ada item).'; const lines=['Halo, saya ingin pesan:']; cart.forEach(ci=>{ const addons=(ci.addons||[]).map(aId=>MENU.Addons.find(a=>a.id===aId)?.name).filter(Boolean); lines.push(`- ${ci.name} x${ci.qty}${addons.length?` [${addons.join(', ')}]`:''} = ${currency(itemSubtotal(ci))}`); }); lines.push(`Total pembayaran: ${currency(total())}`); lines.push('Terima kasih.'); return lines.join('
+'); }
 
-      function toggleAddon(index, addon){
-        setCart(prev => {
-          const copy = [...prev];
-          const found = copy[index].addons || [];
-          const pos = found.indexOf(addon.id);
-          if(pos === -1) found.push(addon.id);
-          else found.splice(pos,1);
-          copy[index].addons = found;
-          return copy;
-        });
-      }
-
-      function removeItem(index){
-        setCart(prev => prev.filter((_,i)=>i!==index));
-      }
-
-      function itemSubtotal(ci){
-        const addonSum = (ci.addons || []).reduce((s,aId)=>{
-          const a = MENU.Addons.find(x=>x.id===aId);
-          return s + (a ? a.price : 0);
-        },0);
-        return (ci.price + addonSum) * ci.qty;
-      }
-
-      function total(){
-        return cart.reduce((s,ci)=> s + itemSubtotal(ci), 0);
-      }
-
-      function buildMessage(){
-        if(cart.length===0) return 'Halo saya ingin pesan, (belum ada item).';
-        let lines = ['Halo, saya ingin pesan:'];
-        cart.forEach(ci =>{
-          const addons = (ci.addons||[]).map(aId => MENU.Addons.find(a=>a.id===aId)?.name).filter(Boolean);
-          const addonsText = addons.length ? ` [${addons.join(', ')}]` : '';
-          lines.push(`- ${ci.name} x${ci.qty}${addonsText} = ${currency(itemSubtotal(ci))}`);
-        });
-        lines.push(`Total pembayaran: ${currency(total())}`);
-        lines.push('Terima kasih.');
-        return lines.join('\n');
-      }
-
-      async function sendOrder(){
-        if(cart.length===0) return alert('Keranjang kosong');
-        setSending(true);
-        const message = buildMessage();
-        try{
-          const payload = { message, cart, total: total(), createdAt: new Date().toISOString() };
-          const res = await fetch(`${DB_URL}/orders.json`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          const json = await res.json();
-          setLastResult({ ok: res.ok, resp: json });
-        }catch(err){
-          setLastResult({ ok:false, error: String(err) });
-        }
-        const waText = encodeURIComponent(message);
-        const waUrl = `https://wa.me/${WA_PHONE}?text=${waText}`;
-        window.open(waUrl, '_blank');
-        setSending(false);
-      }
+      async function sendOrder(){ if(!cart.length) return alert('Keranjang kosong'); setSending(true); const message=buildMessage(); const payload={ message, cart, total: total(), createdAt: new Date().toISOString(), status: 'new' };
+        try{ const resp = await postOrder(payload); setLastResult({ ok:true, resp }); }catch(err){ setLastResult({ ok:false, error:String(err) }); }
+        window.open(`https://wa.me/${WA_PHONE}?text=${encodeURIComponent(message)}`, '_blank'); setSending(false); setCart([]); }
 
       return (
         <div className="min-h-screen bg-gray-50 p-6">
-          <div className="max-w-4xl mx-auto bg-white rounded-2xl shadow p-6 grid md:grid-cols-2 gap-6">
-            <div>
-              <h1 className="text-2xl font-bold mb-4">Numpang Ngopi — Pemesanan</h1>
-              <p className="text-sm text-gray-600 mb-4">Pilih menu, atur jumlah dan addons. Pesanan akan dikirim ke WhatsApp dan tersimpan di Firebase.</p>
-              {Object.entries(MENU).filter(([k])=>k!=='Addons').map(([group, items])=> (
-                <div key={group} className="mb-6">
-                  <h2 className="font-semibold mb-2">{group}</h2>
-                  <div className="grid grid-cols-2 gap-3">
-                    {items.map(it=> (
-                      <div key={it.id} className="border rounded p-3 flex flex-col justify-between">
-                        <div>
-                          <div className="font-medium">{it.name}</div>
-                          <div className="text-sm text-gray-600">{currency(it.price)}</div>
+          <div className="max-w-5xl mx-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h1 className="text-2xl font-bold">Numpang Ngopi. crb — Mangkal's</h1>
+              <div className="flex gap-2">
+                <button onClick={()=>setScreen('pos')} className={`px-3 py-1 rounded ${screen==='pos'?'bg-blue-600 text-white':'border'}`}>POS</button>
+                <button onClick={()=>setScreen('barista')} className={`px-3 py-1 rounded ${screen==='barista'?'bg-yellow-500 text-white':'border'}`}>Display Barista</button>
+                <button onClick={()=>setScreen('cooking')} className={`px-3 py-1 rounded ${screen==='cooking'?'bg-orange-500 text-white':'border'}`}>Display Cooking</button>
+                <button onClick={()=>setScreen('owner')} className={`px-3 py-1 rounded ${screen==='owner'?'bg-green-600 text-white':'border'}`}>Laporan Owner</button>
+              </div>
+            </div>
+
+            {screen==='pos' && (
+              <div className="bg-white rounded-2xl shadow p-6 grid md:grid-cols-2 gap-6">
+                <div>
+                  <p className="text-sm text-gray-600 mb-4">Pilih menu, atur jumlah dan addons. Pesanan disimpan realtime & dikirim ke WhatsApp.</p>
+                  {Object.entries(MENU).filter(([k])=>k!=='Addons').map(([group, items])=> (
+                    <div key={group} className="mb-6">
+                      <h2 className="font-semibold mb-2">{group}</h2>
+                      <div className="grid grid-cols-2 gap-3">
+                        {items.map((it, idx)=> (
+                          <div key={it.id} className="border rounded overflow-hidden bg-white flex flex-col">
+                            <img src={makeIllustration(it.name, idx + (group.length))} alt={it.name} className="menu-img" />
+                            <div className="p-3 flex flex-col flex-1">
+                              <div className="font-medium">{it.name}</div>
+                              <div className="text-sm text-gray-600">{currency(it.price)}</div>
+                              <button onClick={()=>addToCart(it)} className="mt-auto px-3 py-1 bg-blue-600 text-white rounded">Tambah</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="mt-4 text-xs text-gray-500">Addons: Creamy (1K), Aren (1K), Es Batu (1K).</div>
+                </div>
+
+                <div>
+                  <h2 className="text-lg font-semibold">Keranjang</h2>
+                  <div className="mt-3 space-y-3">
+                    {cart.length===0 && <div className="text-sm text-gray-500">Keranjang kosong.</div>}
+                    {cart.map((ci, idx)=> (
+                      <div key={idx} className="border rounded p-3">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <div className="font-medium">{ci.name}</div>
+                            <div className="text-sm text-gray-600">{currency(ci.price)}</div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button onClick={()=>changeQty(idx,-1)} className="px-2 py-1 border rounded">-</button>
+                            <div>{ci.qty}</div>
+                            <button onClick={()=>changeQty(idx,1)} className="px-2 py-1 border rounded">+</button>
+                          </div>
                         </div>
-                        <button onClick={()=>addToCart(it)} className="mt-3 px-3 py-1 bg-blue-600 text-white rounded">Tambah</button>
+                        <div className="mt-2 text-sm">Addons:</div>
+                        <div className="flex gap-2 mt-1 flex-wrap">
+                          {MENU.Addons.map(ad=> (
+                            <label key={ad.id} className="text-sm flex items-center gap-1">
+                              <input type="checkbox" checked={(ci.addons||[]).includes(ad.id)} onChange={()=>toggleAddon(idx,ad)} />
+                              <span>{ad.name} (+{currency(ad.price)})</span>
+                            </label>
+                          ))}
+                        </div>
+                        <div className="mt-2 flex justify-between items-center">
+                          <div className="text-sm text-gray-600">Subtotal: {currency(itemSubtotal(ci))}</div>
+                          <button onClick={()=>removeItem(idx)} className="text-red-600 text-sm">Hapus</button>
+                        </div>
                       </div>
                     ))}
                   </div>
-                </div>
-              ))}
-              <div className="mt-4 text-xs text-gray-500">Addons: Creamy (1K), Aren (1K), Es Batu (1K).</div>
-            </div>
 
-            <div>
-              <h2 className="text-lg font-semibold">Keranjang</h2>
-              <div className="mt-3 space-y-3">
-                {cart.length===0 && <div className="text-sm text-gray-500">Keranjang kosong.</div>}
-                {cart.map((ci, idx) => (
-                  <div key={idx} className="border rounded p-3">
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <div className="font-medium">{ci.name}</div>
-                        <div className="text-sm text-gray-600">{currency(ci.price)}</div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button onClick={()=>changeQty(idx, -1)} className="px-2 py-1 border rounded">-</button>
-                        <div>{ci.qty}</div>
-                        <button onClick={()=>changeQty(idx, +1)} className="px-2 py-1 border rounded">+</button>
-                      </div>
+                  <div className="mt-4 border-t pt-4">
+                    <div className="flex justify-between"><div className="font-medium">Total</div><div className="font-semibold">{currency(total())}</div></div>
+                    <div className="mt-4 flex gap-2">
+                      <button onClick={sendOrder} disabled={sending||!cart.length} className="flex-1 py-2 rounded bg-green-600 text-white">{sending?'Mengirim...':'Kirim ke WhatsApp & Simpan'}</button>
+                      <button onClick={()=>{ setCart([]); setLastResult(null); localStorage.removeItem('numpang_cart'); }} className="py-2 px-3 rounded border">Kosongkan</button>
                     </div>
-                    <div className="mt-2 text-sm">Addons:</div>
-                    <div className="flex gap-2 mt-1 flex-wrap">
-                      {MENU.Addons.map(ad => (
-                        <label key={ad.id} className="text-sm flex items-center gap-1">
-                          <input type="checkbox" checked={(ci.addons||[]).includes(ad.id)} onChange={()=>toggleAddon(idx, ad)} />
-                          <span>{ad.name} (+{currency(ad.price)})</span>
-                        </label>
-                      ))}
-                    </div>
-                    <div className="mt-2 flex justify-between items-center">
-                      <div className="text-sm text-gray-600">Subtotal: {currency(itemSubtotal(ci))}</div>
-                      <button onClick={()=>removeItem(idx)} className="text-red-600 text-sm">Hapus</button>
-                    </div>
+                    {lastResult && <div className={`mt-3 text-sm ${lastResult.ok?'text-green-700':'text-red-700'}`}>{lastResult.ok?`Disimpan ke Firebase`:`Gagal simpan: ${lastResult.error||JSON.stringify(lastResult.resp)}`}</div>}
                   </div>
-                ))}
-              </div>
-              <div className="mt-4 border-t pt-4">
-                <div className="flex justify-between">
-                  <div className="font-medium">Total</div>
-                  <div className="font-semibold">{currency(total())}</div>
                 </div>
-                <div className="mt-4 flex gap-2">
-                  <button onClick={sendOrder} disabled={sending || cart.length===0} className="flex-1 py-2 rounded bg-green-600 text-white">{sending ? 'Mengirim...' : 'Kirim ke WhatsApp & Simpan'}</button>
-                  <button onClick={()=>{ setCart([]); setLastResult(null); localStorage.removeItem('numpang_cart'); }} className="py-2 px-3 rounded border">Kosongkan</button>
-                </div>
-                {lastResult && (
-                  <div className={`mt-3 text-sm ${lastResult.ok ? 'text-green-700' : 'text-red-700'}`}>
-                    {lastResult.ok ? `Disimpan ke Firebase (key: ${lastResult.resp.name || '–'})` : `Gagal simpan: ${lastResult.error || JSON.stringify(lastResult.resp)}`}
-                  </div>
-                )}
               </div>
-            </div>
+            )}
+
+            {screen==='barista' && <DisplayScreen kind="barista" />}
+            {screen==='cooking' && <DisplayScreen kind="cooking" />}
+            {screen==='owner' && <OwnerReport />}
+
           </div>
-          <footer className="max-w-4xl mx-auto text-center mt-6 text-xs text-gray-500">Made for Numpang Ngopi. Crb — Mangkal's</footer>
+        </div>
+      );
+    }
+
+    // --- Display screen component (Barista / Cooking) with status update ---
+    function DisplayScreen({kind}){
+      const [orders, setOrders] = React.useState([]);
+      React.useEffect(()=>{
+        let mounted=true;
+        async function load(){ const all = await fetchOrders(); if(!mounted) return; const filtered = all.filter(o => o.status === 'new' || o.status === 'in-progress'); setOrders(filtered.reverse()); }
+        load(); const id = setInterval(load,5000); return ()=>{ mounted=false; clearInterval(id); };
+      },[]);
+
+      async function setStatus(o, status){ await patchOrder(o.key, { status }); const all = await fetchOrders(); const filtered = all.filter(x=>x.status==='new'||x.status==='in-progress'); setOrders(filtered.reverse()); }
+
+      return (
+        <div className="mt-4 p-4 screen-card bg-white shadow mx-auto">
+          <h3 className="font-semibold mb-2">Display {kind === 'barista' ? 'Barista' : 'Cooking'}</h3>
+          {orders.length===0 && <div className="text-sm text-gray-500">Tidak ada pesanan baru.</div>}
+          <div className="space-y-3 mt-2">
+            {orders.map(o=> (
+              <div key={o.key} className="border rounded p-2">
+                <div className="text-sm">{new Date(o.createdAt).toLocaleString()}</div>
+                <div className="font-medium">{o.message.split('
+')[1] || o.message}</div>
+                <div className="flex gap-2 mt-2">
+                  {o.status !== 'in-progress' && <button onClick={()=>setStatus(o,'in-progress')} className="px-3 py-1 rounded bg-yellow-400">Mark In-Progress</button>}
+                  {o.status !== 'done' && <button onClick={()=>setStatus(o,'done')} className="px-3 py-1 rounded bg-green-500 text-white">Mark Done</button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // --- Owner report ---
+    function OwnerReport(){
+      const [orders, setOrders] = React.useState([]);
+      React.useEffect(()=>{ let mounted=true; async function load(){ const all = await fetchOrders(); if(!mounted) return; setOrders(all.reverse()); } load(); },[]);
+      const totalRevenue = orders.reduce((s,o)=>s+(o.total||0),0);
+      return (
+        <div className="mt-4 p-4 screen-card bg-white shadow mx-auto">
+          <h3 className="font-semibold mb-2">Laporan Owner — Numpang Ngopi.crb</h3>
+          <div className="text-sm text-gray-600 mb-3">Total pesanan: {orders.length} — Total pendapatan: {currency(totalRevenue)}</div>
+          <div className="space-y-2 max-h-64 overflow-auto">
+            {orders.map(o=> (
+              <div key={o.key} className="border rounded p-2 text-sm">
+                <div className="flex justify-between"><div>{new Date(o.createdAt).toLocaleString()}</div><div>{currency(o.total||0)}</div></div>
+                <div className="mt-1">{o.message.split('
+').slice(1).join(' / ')}</div>
+                <div className="mt-1 text-xs text-gray-500">Status: {o.status || 'undefined'}</div>
+              </div>
+            ))}
+          </div>
         </div>
       );
     }
