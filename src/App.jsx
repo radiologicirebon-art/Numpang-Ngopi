@@ -385,3 +385,123 @@ export default function App() {
           </div>
         )}
 
+        {screen === 'barista' && <DisplayScreen kind="barista" />}
+        {screen === 'cooking' && <DisplayScreen kind="cooking" />}
+        {screen === 'owner' && <OwnerReport />}
+      </div>
+    </div>
+  )
+}
+
+// --- Display Screen ---
+function DisplayScreen({ kind }) {
+  const [orders, setOrders] = useState([])
+  useEffect(() => {
+    let mounted = true
+    async function load() {
+      const all = await fetchOrders()
+      if (!mounted) return
+      const filtered = all.filter(
+        (o) => o.status === 'new' || o.status === 'in-progress',
+      )
+      setOrders(filtered.reverse())
+    }
+    load()
+    const id = setInterval(load, 5000)
+    return () => {
+      mounted = false
+      clearInterval(id)
+    }
+  }, [])
+
+  async function setStatus(o, status) {
+    await patchOrder(o.key, { status })
+    const all = await fetchOrders()
+    const filtered = all.filter(
+      (x) => x.status === 'new' || x.status === 'in-progress',
+    )
+    setOrders(filtered.reverse())
+  }
+
+  return (
+    <div className="mt-4 p-4 screen-card bg-white shadow mx-auto">
+      <h3 className="font-semibold mb-2">
+        Display {kind === 'barista' ? 'Barista' : 'Cooking'}
+      </h3>
+      {orders.length === 0 && (
+        <div className="text-sm text-gray-500">Tidak ada pesanan baru.</div>
+      )}
+      <div className="space-y-3 mt-2">
+        {orders.map((o) => (
+          <div key={o.key} className="border rounded p-2">
+            <div className="text-sm">
+              {new Date(o.createdAt).toLocaleString()}
+            </div>
+            <div className="font-medium">
+              {o.message.split('\n')[1] || o.message}
+            </div>
+            <div className="flex gap-2 mt-2">
+              {o.status !== 'in-progress' && (
+                <button
+                  onClick={() => setStatus(o, 'in-progress')}
+                  className="px-3 py-1 rounded bg-yellow-400"
+                >
+                  Mark In-Progress
+                </button>
+              )}
+              {o.status !== 'done' && (
+                <button
+                  onClick={() => setStatus(o, 'done')}
+                  className="px-3 py-1 rounded bg-green-500 text-white"
+                >
+                  Mark Done
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// --- Owner Report ---
+function OwnerReport() {
+  const [orders, setOrders] = useState([])
+  useEffect(() => {
+    let mounted = true
+    async function load() {
+      const all = await fetchOrders()
+      if (!mounted) return
+      setOrders(all.reverse())
+    }
+    load()
+  }, [])
+  const totalRevenue = orders.reduce((s, o) => s + (o.total || 0), 0)
+
+  return (
+    <div className="mt-4 p-4 screen-card bg-white shadow mx-auto">
+      <h3 className="font-semibold mb-2">Laporan Owner — Numpang Ngopi.crb</h3>
+      <div className="text-sm text-gray-600 mb-3">
+        Total pesanan: {orders.length} — Total pendapatan:{' '}
+        {currency(totalRevenue)}
+      </div>
+      <div className="space-y-2 max-h-64 overflow-auto">
+        {orders.map((o) => (
+          <div key={o.key} className="border rounded p-2 text-sm">
+            <div className="flex justify-between">
+              <div>{new Date(o.createdAt).toLocaleString()}</div>
+              <div>{currency(o.total || 0)}</div>
+            </div>
+            <div className="mt-1">
+              {o.message.split('\n').slice(1).join(' / ')}
+            </div>
+            <div className="mt-1 text-xs text-gray-500">
+              Status: {o.status || 'undefined'}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
